@@ -1,6 +1,3 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/skibidi399/.../refs/heads/main/scrirble.txt"))()
-
-
 -- skibidi
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
