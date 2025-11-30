@@ -1,3 +1,6 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/skibidi399/.../refs/heads/main/scrirble.txt"))()
+
+
 -- skibidi
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -85,8 +88,7 @@ local autoBlockTriggerAnims = {
 -- State Variables
 local autoBlockOn = false
 local autoBlockAudioOn = false
-local floatingGuiAudio = nil
-local floatingGuiAnim = nil
+
 local doubleblocktech = false
 local blockdelay = 0
 local looseFacing = true
@@ -1387,11 +1389,8 @@ local function _attemptForSound(sound, idParam, mode)
             return
         end
         fireGuiBlock()
-        if doubleblocktech and cachedCharges and cachedCharges.Text == "1" then
-                        fireGuiPunch()
-                    end
-                end)
-            end
+        if doubleblocktech == true then
+            fireGuiPunch()
         end
     elseif mode == "Charge" then
         if cachedChargeBtn and cachedChargeBtn:FindFirstChild("CooldownTime") and cachedChargeBtn.CooldownTime.Text == "" then
@@ -1508,7 +1507,7 @@ local function attemptBDParts(sound)
                 local part = Instance.new("Part")
                 part.Name = "AntiFlickZone"
                 part.Size = partSize
-                part.Transparency = BD_PART_TRANSPARENCY
+                part.Transparency = 0.45
                 part.Anchored = true
                 part.CanCollide = false
                 part.CFrame = CFrame.new(spawnPos, hrp.Position)
@@ -1814,51 +1813,70 @@ local START_WINDOW = 0     -- consider a track "starting" if TimePosition <= STA
 
 local trackLastTriggered = setmetatable({}, { __mode = "k" }) -- weak keys (AnimationTrack -> last tick)
 
-RunService.RenderStepped:Connect(function()
-    if not doubleblocktech then return end
-    local char = lp and lp.Character
-    if not char then return end
 
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    local animator = cachedAnimator
-    if not animator then
-        refreshAnimator()
-        animator = cachedAnimator
+-- Play a custom charge animation and stop it when LP touches a non-player part or after 4s
+local function playCustomChargeWithAutoStop(animId)
+    if not lp or not lp.Character then return end
+    local char = lp.Character
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+
+    -- get or create Animator
+    local animator = hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum)
+
+    local anim = Instance.new("Animation")
+    anim.AnimationId = "rbxassetid://" .. tostring(animId)
+
+    local ok, track = pcall(function() return animator:LoadAnimation(anim) end)
+    if not ok or not track then
+        warn("Failed to load charge animation:", animId)
+        return
     end
 
-    -- ensure GUI refs fresh if missing (helps when GUI recreates)
-    if _REFRESH_UI_IF_NIL and (not cachedPunchBtn or not cachedCharges) and type(refreshUIRefs) == "function" then
-        pcall(refreshUIRefs)
+    track:Play()
+
+    local stopped = false
+    local touchConn
+    local timeoutConn
+
+    -- stop function (safe, idempotent)
+    local function stopTrack()
+        if stopped then return end
+        stopped = true
+        pcall(function() track:Stop() end)
+        if touchConn and touchConn.Connected then pcall(function() touchConn:Disconnect() end) end
+        if timeoutConn and timeoutConn.Connected then pcall(function() timeoutConn:Disconnect() end) end
     end
 
-    for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-        local ok, animId = pcall(function()
-            local a = track.Animation
-            return a and tostring(a.AnimationId):match("%d+")
-        end)
-        if ok and animId and table.find(blockAnimIds, animId) then
-            -- safe read of time position
-            local timePos = 0
-            pcall(function() timePos = track.TimePosition or 0 end)
+    -- stop when HRP touches a part that's not part of our character
+    touchConn = hrp.Touched:Connect(function(part)
+        if stopped then return end
+        if not part then return end
+        if part:IsDescendantOf(char) then return end -- ignore touching own character parts
+        -- optional: ignore other players' characters if you want; here we treat anything not part of our char as "wall"
+        stopTrack()
+    end)
 
-            -- only trigger when the track is just starting (helps with timing)
-            if timePos <= START_WINDOW then
-                local last = trackLastTriggered[track]
-                if not last or (tick() - last) >= TRACK_DEBOUNCE then
-                    trackLastTriggered[track] = tick()
-                    -- extra safety: ensure punch button exists before trying
-                    if cachedPunchBtn == nil and type(refreshUIRefs) == "function" then
-                        pcall(refreshUIRefs)
-                    end
-
-                    -- try GUI-based punch activation (this function already handles safety)
-                    print("trying to punch")
-                    pcall(fireGuiPunch)
-                end
-            end
+    -- timeout after 4 seconds (hard stop)
+    timeoutConn = nil
+    task.spawn(function()
+        local start = tick()
+        while not stopped and (tick() - start) < 4 do
+            task.wait(0.05)
         end
-    end
-end)
+        if not stopped then
+            stopTrack()
+        end
+    end)
+
+    -- try to clean up if the track stops normally (AnimationTrack may have Stopped event)
+    pcall(function()
+        if track.Stopped then
+            track.Stopped:Connect(stopTrack)
+        end
+    end)
+end
 
 local lastReplaceTime = {
     block = 0,
@@ -1894,6 +1912,16 @@ task.spawn(function()
                     newAnim.AnimationId = "rbxassetid://" .. customBlockAnimId
                     local newTrack = animator:LoadAnimation(newAnim)
                     newTrack:Play()
+
+                    -- auto-stop after 2.7 seconds (safe)
+                    task.delay(customblockdelay, function()
+                        pcall(function()
+                            if newTrack and newTrack.IsPlaying then
+                                newTrack:Stop()
+                            end
+                        end)
+                    end)
+
                     break
                 end
             end
@@ -1907,11 +1935,22 @@ task.spawn(function()
                 if tick() - lastReplaceTime.punch >= 3 then
                     lastReplaceTime.punch = tick()
                     track:Stop()
-
+  
+                    -- with this patch:
                     local newAnim = Instance.new("Animation")
                     newAnim.AnimationId = "rbxassetid://" .. customPunchAnimId
                     local newTrack = animator:LoadAnimation(newAnim)
                     newTrack:Play()
+
+                    -- auto-stop after 2.7 seconds (safe)
+                    task.delay(custompunchdelay, function()
+                        pcall(function()
+                            if newTrack and newTrack.IsPlaying then
+                                newTrack:Stop()
+                            end
+                        end)
+                    end)
+
                     break
                 end
             end
@@ -1928,8 +1967,8 @@ task.spawn(function()
 
                     local newAnim = Instance.new("Animation")
                     newAnim.AnimationId = "rbxassetid://" .. customChargeAnimId
-                    local newTrack = animator:LoadAnimation(newAnim)
-                    newTrack:Play()
+                    -- Instead of directly playing the custom track, use the helper so it auto-stops on touch or after 4s
+                    playCustomChargeWithAutoStop(customChargeAnimId)
                     break
                 end
             end
@@ -1963,10 +2002,10 @@ RunService.RenderStepped:Connect(function()
                         if autoBlockOn and (hrp.Position - myRoot.Position).Magnitude <= detectionRange then
                             if isFacing(myRoot, hrp) then
                                 if cooldown and cooldown.Text == "" then
-                                    fireRemoteBlock()
+                                    fireGuiBlock()
                                 end
-                                if doubleblocktech and cachedCharges and cachedCharges.Text == "1" then
-                                   fireGuiPunch()
+                                if doubleblocktech == true and charges and charges.Text == "1" then
+                                    fireGuiPunch()
                                 end
                             end
                         end
@@ -2530,26 +2569,6 @@ if Library then
             end
         end,
     })
-    
-    -- Better Detection Transparent with Input --
-    local BD_PART_TRANSPARENCY = 0.45
-    
-    BDLeftGroup:AddInput("Part Transparant", {
-        Text = "Part Transparency (0 = solid, 1 = invisible)",
-        Default = "0.45",
-        Numeric = true,
-        ClearTextOnFocus = false,
-        Placeholder = "0.45",
-        Callback = function(Value)
-            local num = tonumber(text)
-            if num and num >= 0 and num <= 1 then
-                BD_PART_TRANSPARENCY = num
-            print("[BD] Part Transparency set to:", num)
-        else
-            warn("[BD] Invalid transparency value (must be 0ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ1)")
-        end
-    end
-})
 
     TechLeftGroup:AddToggle("doubleblockTechtoggle", {
         Text = "Double Punch Tech",
